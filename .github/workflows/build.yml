@@ -1,125 +1,89 @@
-name: Automated Test Build
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+name: build ocgcore dll with FTD
 
 on:
   push:
-    branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
+    branches: [ "master", "main" ]
+  workflow_dispatch:
 
 jobs:
   build-windows:
     runs-on: windows-2022
-
     steps:
-    - name: Checkout
-      uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Download lua
-      id: lua
-      uses: mercury233/action-cache-download-file@42a33307a0e00b163efaf26f29149a62d7bbd37d # v1.3.0
-      with:
-        url: https://www.lua.org/ftp/lua-5.4.8.tar.gz
-        sha256: 4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae
+      - name: Apply FTD patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          import sys
+          def rep(path, old, new):
+              with open(path, 'r', encoding='utf-8', newline='') as f:
+                  s = f.read()
+              if s.count(old) != 1:
+                  print('ERROR: pattern count=%d in %s' % (s.count(old), path))
+                  print(repr(old))
+                  sys.exit(1)
+              s = s.replace(old, new, 1)
+              with open(path, 'w', encoding='utf-8', newline='') as f:
+                  f.write(s)
+              print('patched:', path)
 
-    - name: Lua
-      run: |
-        tar -xzf ${{ steps.lua.outputs.filepath }}
-        move lua-5.4.8 lua
+          rep('common.h',
+              '#define DUEL_REVEAL_DECK_SEQ\t0x100',
+              '#define DUEL_REVEAL_DECK_SEQ\t0x100\n// Custom: first turn draw (FTD). Off by default; opt-in via duel options.\n#define DUEL_FIRST_TURN_DRAW\t0x200')
 
-    - name: Download premake
-      id: premake
-      uses: mercury233/action-cache-download-file@42a33307a0e00b163efaf26f29149a62d7bbd37d
-      with:
-        url: https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-windows.zip
-        sha256: e64ce2ed8778e0098f63674cca61fe33941b5f0c8d9a4afd651152bdea3758ab
+          rep('field.cpp',
+              '\tif ((core.duel_rule >= 3) && (infos.turn_id == 1) && (infos.turn_player == playerid)) {',
+              '\tif (!(core.duel_options & DUEL_FIRST_TURN_DRAW) && (core.duel_rule >= 3) && (infos.turn_id == 1) && (infos.turn_player == playerid)) {')
 
-    - name: Premake
-      run: |
-        mkdir premake-5
-        7z x ${{ steps.premake.outputs.filepath }} -opremake-5
-        copy premake\lua.lua lua\premake5.lua
-        copy premake\dll.lua dll.lua
-        .\premake-5\premake5.exe vs2022 --file=dll.lua
+          rep('processor.cpp',
+              '\t\tif((core.duel_rule <= 2) || (infos.turn_id > 1)) {',
+              '\t\tif((core.duel_options & DUEL_FIRST_TURN_DRAW) || (core.duel_rule <= 2) || (infos.turn_id > 1)) {')
 
-    - name: Add msbuild to PATH
-      uses: microsoft/setup-msbuild@v3
+          print('FTD patch applied OK')
+          PY
 
-    - name: Build x32
-      run: |
-        msbuild build\ocgcoredll.sln /m /t:Build /p:"Configuration=Release;Platform=Win32"
+      - name: Download lua
+        id: lua
+        uses: mercury233/action-cache-download-file@42a33307a0e00b163efaf26f29149a62d7bbd37d
+        with:
+          url: https://www.lua.org/ftp/lua-5.4.8.tar.gz
+          sha256: 4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae
 
-    - name: Build x64
-      run: |
-        msbuild build\ocgcoredll.sln /m /t:Build /p:"Configuration=Release;Platform=x64"
+      - name: Lua
+        run: |
+          tar -xzf ${{ steps.lua.outputs.filepath }}
+          move lua-5.4.8 lua
 
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v6
-      with:
-        name: ocgcore-windows
-        path: |
-          build/bin/x32/Release/ocgcore.dll
-          build/bin/x64/Release/ocgcore.dll
+      - name: Download premake
+        id: premake
+        uses: mercury233/action-cache-download-file@42a33307a0e00b163efaf26f29149a62d7bbd37d
+        with:
+          url: https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-windows.zip
+          sha256: e64ce2ed8778e0098f63674cca61fe33941b5f0c8d9a4afd651152bdea3758ab
 
-  build-linux:
-    runs-on: ubuntu-latest
+      - name: Premake
+        run: |
+          mkdir premake-5
+          7z x ${{ steps.premake.outputs.filepath }} -opremake-5
+          copy premake\lua.lua lua\premake5.lua
+          copy premake\dll.lua dll.lua
+          .\premake-5\premake5.exe vs2022 --file=dll.lua
 
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v6
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v3
 
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y gcc-multilib g++-multilib
+      - name: Build x32
+        run: msbuild build\ocgcoredll.sln /m /t:Build /p:"Configuration=Release;Platform=Win32"
 
-    - name: Download lua
-      id: lua
-      uses: mercury233/action-cache-download-file@42a33307a0e00b163efaf26f29149a62d7bbd37d
-      with:
-        url: https://www.lua.org/ftp/lua-5.4.8.tar.gz
-        sha256: 4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae
+      - name: Build x64
+        run: msbuild build\ocgcoredll.sln /m /t:Build /p:"Configuration=Release;Platform=x64"
 
-    - name: Lua
-      run: |
-        tar -xzf ${{ steps.lua.outputs.filepath }}
-        mv lua-5.4.8 lua
-
-    - name: Download premake
-      id: premake
-      uses: mercury233/action-cache-download-file@42a33307a0e00b163efaf26f29149a62d7bbd37d
-      with:
-        url: https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-linux.tar.gz
-        sha256: 63edd3e7461eebdd45b500a3c7e8ad4e7a67d68f230010f9a97cbb71b4ec59c8
-
-    - name: Premake
-      run: |
-        mkdir premake-5
-        tar -C premake-5 -xzf ${{ steps.premake.outputs.filepath }}
-        cp premake/lua.lua lua/premake5.lua
-        cp premake/dll.lua dll.lua
-        chmod +x premake-5/premake5
-        ./premake-5/premake5 gmake --file=dll.lua
-
-    - name: Build x32
-      run: |
-        cd build
-        make -j $(nproc) config=release_x32
-        cd ..
-
-    - name: Build x64
-      run: |
-        cd build
-        make -j $(nproc) config=release_x64
-        cd ..
-
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v6
-      with:
-        name: ocgcore-linux
-        path: |
-          build/bin/x32/Release/libocgcore.so
-          build/bin/x64/Release/libocgcore.so
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocgcore-windows
+          path: |
+            build/bin/x32/Release/ocgcore.dll
+            build/bin/x64/Release/ocgcore.dll
